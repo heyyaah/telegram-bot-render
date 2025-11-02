@@ -192,6 +192,7 @@ def send_new_status_message(user_id, status_text):
         conn.execute('UPDATE users SET message_id = ? WHERE user_id = ?', (new_message_id, user_id))
         conn.commit()
         conn.close()
+        logger.info(f"✅ Создано новое сообщение со статусом: {new_message_id}")
         return True
     
     conn.close()
@@ -210,23 +211,21 @@ def update_server_status(user_id, status):
     conn.commit()
     conn.close()
     
-    # Бот создает/редактирует СВОЁ сообщение
+    # Бот редактирует существующее сообщение
     status_text = generate_status_text(user_id, status)
     
-    # Если message_id уже есть - редактируем, иначе создаем новое
+    # Если message_id есть - редактируем
     if user['message_id']:
         success = edit_message(user['group_id'], user['message_id'], status_text)
-        if not success:
-            # Если редактирование не удалось (сообщение удалено), создаем новое
-            success = send_new_status_message(user_id, status_text)
+        if success:
+            logger.info(f"✅ Сообщение {user['message_id']} отредактировано")
+        else:
+            logger.warning(f"❌ Не удалось отредактировать сообщение {user['message_id']}")
+        return success
     else:
-        # Первый раз - создаем новое сообщение
-        success = send_new_status_message(user_id, status_text)
-    
-    if success:
-        notify_subscribers(user_id, status)
-    
-    return success
+        # Сообщения нет - возвращаем False, чтобы показать кнопку создания
+        logger.warning("❌ Сообщение для редактирования не найдено")
+        return False
 
 def generate_status_text(user_id, status):
     conn = get_db_connection()
@@ -588,6 +587,13 @@ def get_welcome_buttons():
         [{"text": "🔍 Как найти thread_id?", "callback_data": "help_thread_id"}]
     ]
 
+def get_create_message_buttons():
+    """Кнопки для создания сообщения"""
+    return [
+        [{"text": "📝 Создать сообщение", "callback_data": "create_status_message"}],
+        [{"text": "🔙 Назад", "callback_data": "back_to_main"}]
+    ]
+
 # 🚀 ОБРАБОТЧИКИ СООБЩЕНИЙ
 def process_update(update):
     global last_activity
@@ -614,27 +620,24 @@ def process_message(message):
         state = user_states[user_id]
         
         if state == "waiting_group_settings":
-            # Ожидаем настройки группы в формате: group_id,thread_id,group_name
+            # Ожидаем настройки группы в формате: group_id,thread_id,message_id,group_name
             try:
                 parts = text.split(',')
-                if len(parts) >= 3:
+                if len(parts) >= 4:
                     group_id = int(parts[0])
                     thread_id = int(parts[1]) if parts[1].strip() else None
-                    group_name = parts[2]
+                    message_id = int(parts[2])
+                    group_name = parts[3]
                     
-                    # message_id = None - бот создаст сам
-                    setup_user_settings(user_id, group_id, thread_id, None, group_name)
+                    # Сохраняем настройки с указанным message_id
+                    setup_user_settings(user_id, group_id, thread_id, message_id, group_name)
                     
-                    # Сразу создаем сообщение со статусом
-                    if send_new_status_message(user_id, generate_status_text(user_id, "status_unknown")):
-                        if thread_id:
-                            send_message(user_id, f"✅ Группа '{group_name}' настроена! Бот создал сообщение в теме {thread_id}.", buttons=get_main_menu_buttons())
-                        else:
-                            send_message(user_id, f"✅ Группа '{group_name}' настроена! Бот создал сообщение в основном чате.", buttons=get_main_menu_buttons())
-                    else:
-                        send_message(user_id, "❌ Ошибка: проверьте права бота в группе")
+                    send_message(user_id, 
+                                f"✅ Группа '{group_name}' настроена!\n"
+                                f"💬 Бот будет редактировать сообщение: {message_id}",
+                                buttons=get_main_menu_buttons())
                 else:
-                    send_message(user_id, "❌ Неверный формат. Используйте: group_id,thread_id,название_группы")
+                    send_message(user_id, "❌ Неверный формат. Используйте: group_id,thread_id,message_id,название_группы")
             except ValueError:
                 send_message(user_id, "❌ Ошибка в данных. Проверьте числовые значения.")
             
@@ -695,21 +698,21 @@ def process_message(message):
             welcome_text = (
                 "🤖 <b>Добро пожаловать в бот управления статусами серверов!</b>\n\n"
                 "📋 <b>Для начала работы:</b>\n\n"
-                "1. Добавьте бота в вашу группу\n"
-                "2. Дайте права на отправку сообщений\n"
-                "3. Бот создаст отдельное сообщение для статуса\n"
+                "1. Создайте сообщение в группе для статуса\n"
+                "2. Добавьте бота в группу\n"
+                "3. Дайте права на редактирование сообщений\n"
                 "4. Отправьте данные в формате:\n"
-                "<code>group_id,thread_id,название_группы</code>\n\n"
+                "<code>group_id,thread_id,message_id,название_группы</code>\n\n"
                 "📝 <b>Примеры:</b>\n"
                 "• <b>Обычная группа</b> (без тем):\n"
-                "<code>-100123456789,,Мой Сервер</code>\n\n"
+                "<code>-100123456789,,123,Мой Сервер</code>\n\n"
                 "• <b>Группа с темами</b>:\n"
-                "<code>-100123456789,123,Мой Сервер</code>\n\n"
-                "🔍 <b>Как найти thread_id?</b>\n"
-                "• Откройте нужную тему в группе\n"
-                "• Скопируйте ID из ссылки\n"
-                "• Или оставьте пустым для основной темы\n\n"
-                "ℹ️ <i>message_id не нужен - бот создаст своё сообщение</i>"
+                "<code>-100123456789,10,123,Мой Сервер</code>\n\n"
+                "🔍 <b>Как найти данные?</b>\n"
+                "• group_id - ID вашей группы\n"
+                "• thread_id - ID темы (если есть)\n"
+                "• message_id - ID сообщения для редактирования\n\n"
+                "ℹ️ <i>Бот будет редактировать указанное сообщение</i>"
             )
             user_states[user_id] = "waiting_group_settings"
             send_message(user_id, welcome_text, get_welcome_buttons())
@@ -749,6 +752,28 @@ def process_callback(callback):
     
     answer_callback(callback["id"])
     
+    # 🔥 НОВЫЙ ОБРАБОТЧИК - создание сообщения
+    if data == "create_status_message":
+        conn = get_db_connection()
+        user = conn.execute('SELECT * FROM users WHERE user_id = ?', (user_id,)).fetchone()
+        conn.close()
+        
+        if user:
+            # Создаем новое сообщение со статусом
+            status_text = generate_status_text(user_id, "status_unknown")
+            if send_new_status_message(user_id, status_text):
+                edit_message(user_id, message_id,
+                            "✅ <b>Сообщение создано!</b>\n\n"
+                            "Бот создал новое сообщение для статуса в вашей группе.\n"
+                            "Теперь вы можете управлять статусом сервера.",
+                            get_main_menu_buttons())
+            else:
+                edit_message(user_id, message_id,
+                            "❌ <b>Ошибка создания сообщения</b>\n\n"
+                            "Проверьте права бота в группе.",
+                            get_main_menu_buttons())
+        return True
+    
     # 🔥 ИСПРАВЛЕННЫЕ ОБРАБОТЧИКИ АДМИН-ПАНЕЛИ
     if data == "admin_panel":
         if int(user_id) == int(ADMIN_USER_ID):
@@ -787,16 +812,42 @@ def process_callback(callback):
                     [[{"text": "🔙 Отмена", "callback_data": "admin_manage_bot"}]])
         return True
     
+    # Обработка статусов - ТЕПЕРЬ С ПРОВЕРКОЙ СООБЩЕНИЯ
+    elif data.startswith("status_"):
+        success = update_server_status(user_id, data)
+        
+        if success:
+            status_names = {
+                "status_on": "🟢 ВКЛЮЧЕН",
+                "status_pause": "🟡 ПРИОСТАНОВЛЕН", 
+                "status_off": "🔴 ВЫКЛЮЧЕН",
+                "status_unknown": "❓ НЕИЗВЕСТНО"
+            }
+            edit_message(user_id, message_id,
+                        f"✅ <b>Статус обновлен!</b>\n\n"
+                        f"Новый статус: {status_names.get(data, 'Неизвестно')}\n"
+                        f"⏰ Время: {get_current_time(user_id)}",
+                        get_main_menu_buttons())
+        else:
+            # 🔥 ЕСЛИ СООБЩЕНИЯ НЕТ - ПРЕДЛАГАЕМ СОЗДАТЬ
+            edit_message(user_id, message_id,
+                        "❌ <b>Сообщение не найдено!</b>\n\n"
+                        "Бот не может найти сообщение для редактирования.\n"
+                        "Возможно, сообщение было удалено или не настроено.\n\n"
+                        "Создайте новое сообщение для статуса:",
+                        get_create_message_buttons())
+        return True
+    
     # Остальные обработчики
     elif data == "start_setup":
         welcome_text = (
             "🤖 <b>Настройка группы</b>\n\n"
             "Отправьте данные в формате:\n"
-            "<code>group_id,thread_id,название_группы</code>\n\n"
+            "<code>group_id,thread_id,message_id,название_группы</code>\n\n"
             "📝 <b>Пример:</b>\n"
-            "<code>-100123456789,10,Мой Сервер</code>\n\n"
+            "<code>-100123456789,10,123,Мой Сервер</code>\n\n"
             "ℹ️ <i>Если темы нет, оставьте thread_id пустым:</i>\n"
-            "<code>-100123456789,,Мой Сервер</code>"
+            "<code>-100123456789,,123,Мой Сервер</code>"
         )
         user_states[user_id] = "waiting_group_settings"
         edit_message(user_id, message_id, welcome_text)
@@ -804,18 +855,17 @@ def process_callback(callback):
     
     elif data == "help_thread_id":
         help_text = (
-            "🔍 <b>Как найти thread_id темы?</b>\n\n"
-            "1. <b>В мобильном приложении:</b>\n"
-            "   • Откройте нужную тему\n"
-            "   • Нажмите на название темы\n"
-            "   • ID темы будет в ссылке\n\n"
-            "2. <b>В веб-версии:</b>\n"
-            "   • Откройте тему\n"
+            "🔍 <b>Как найти данные?</b>\n\n"
+            "1. <b>group_id</b> - ID группы:\n"
+            "   • Добавьте @RawDataBot в группу\n"
+            "   • Он покажет ID группы\n\n"
+            "2. <b>message_id</b> - ID сообщения:\n"
+            "   • Перешлите сообщение в @RawDataBot\n"
+            "   • Он покажет ID сообщения\n\n"
+            "3. <b>thread_id</b> - ID темы:\n"
+            "   • Откройте тему в веб-версии\n"
             "   • Посмотрите в URL: t.me/c/.../<b>123</b>\n"
-            "   • Число в конце - thread_id\n\n"
-            "3. <b>Если не нашли:</b>\n"
-            "   • Оставьте thread_id пустым\n"
-            "   • Бот будет работать в основном чате"
+            "   • Или оставьте пустым для основной темы"
         )
         edit_message(user_id, message_id, help_text, [[{"text": "🔙 Назад", "callback_data": "start_setup"}]])
         return True
@@ -824,75 +874,4 @@ def process_callback(callback):
         target_user_id = int(data.split("_")[1])
         success, message = subscribe_to_server(user_id, target_user_id)
         
-        if success:
-            show_subscriptions(user_id, message_id)
-            send_message(user_id, message)
-        else:
-            send_message(user_id, f"❌ {message}")
-        return True
-    
-    elif data.startswith("unsubscribe_"):
-        target_user_id = int(data.split("_")[1])
-        success, message = unsubscribe_from_server(user_id, target_user_id)
-        
-        if success:
-            show_subscriptions(user_id, message_id)
-            send_message(user_id, message)
-        else:
-            send_message(user_id, f"❌ {message}")
-        return True
-    
-    elif data == "back_to_main":
-        show_main_menu(user_id, message_id)
-        return True
-        
-    elif data == "back_to_settings":
-        show_settings(user_id, message_id)
-        return True
-        
-    elif data == "manage_status":
-        show_status_management(user_id, message_id)
-        return True
-        
-    elif data == "send_message":
-        user_states[user_id] = "waiting_message"
-        edit_message(user_id, message_id, 
-                    "📝 <b>Отправка сообщения в группу</b>\n\n"
-                    "Введите текст сообщения, которое будет отправлено в вашу группу:",
-                    [[{"text": "🔙 Отмена", "callback_data": "back_to_main"}]])
-        return True
-        
-    elif data == "stats":
-        show_stats(user_id, message_id)
-        return True
-        
-    elif data == "history":
-        show_history(user_id, message_id)
-        return True
-        
-    elif data == "subscriptions":
-        show_subscriptions(user_id, message_id)
-        return True
-        
-    elif data == "settings":
-        show_settings(user_id, message_id)
-        return True
-        
-    elif data == "change_timezone":
-        user_states[user_id] = "waiting_timezone"
-        edit_message(user_id, message_id,
-                    "🕐 <b>Изменение часового пояса</b>\n\n"
-                    "Введите ваш часовой пояс (например: Europe/Moscow, Asia/Yekaterinburg):",
-                    [[{"text": "🔙 Отмена", "callback_data": "back_to_settings"}]])
-        return True
-        
-    elif data == "change_group_settings":
-        user_states[user_id] = "waiting_group_settings"
-        edit_message(user_id, message_id,
-                    "✏️ <b>Настройки группы</b>\n\n"
-                    "Введите данные в формате:\n"
-                    "<code>group_id,thread_id,название_группы</code>\n\n"
-                    "Пример:\n"
-                    "<code>-100123456,10,Мой Сервер</code>\n\n"
-                    "Если темы нет, оставьте thread_id пустым:\n"
-                    "<code>-100123456
+       
