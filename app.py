@@ -1,4 +1,4 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request
 from threading import Thread
 import urllib.request
 import urllib.parse
@@ -801,3 +801,202 @@ def show_stats(user_id, message_id=None):
         edit_message(user_id, message_id, text, [[{"text": "🔙 Назад", "callback_data": "back_to_main"}]])
     else:
         send_message(user_id, text, [[{"text": "🔙 Назад", "callback_data": "back_to_main"}]])
+
+def show_settings(user_id, message_id=None):
+    conn = get_db_connection()
+    user = conn.execute('SELECT * FROM users WHERE user_id = ?', (user_id,)).fetchone()
+    conn.close()
+    
+    group_info = "❌ Не настроено"
+    if user:
+        group_info = f"{user['group_name']}\nID: {user['group_id']}\nСообщение: {user['message_id']}"
+        if user['thread_id']:
+            group_info += f"\nТема: {user['thread_id']}"
+    
+    text = (
+        "⚙️ <b>Настройки</b>\n\n"
+        f"👤 Ваш ID: {user_id}\n"
+        f"🕐 Часовой пояс: {get_user_timezone(user_id)}\n"
+        f"⏰ Текущее время: {get_current_time(user_id)}\n\n"
+        f"📋 Настройки группы:\n{group_info}"
+    )
+    
+    buttons = get_settings_buttons(user_id)
+    
+    if message_id:
+        edit_message(user_id, message_id, text, buttons)
+    else:
+        send_message(user_id, text, buttons)
+
+def show_admin_panel(user_id, message_id=None):
+    if int(user_id) != int(ADMIN_USER_ID):
+        return
+    
+    stats = get_global_stats()
+    text = (
+        "👑 <b>Админ-панель</b>\n\n"
+        f"Всего пользователей: {len(get_all_users())}\n"
+        f"Статус бота: {'🟢 ВКЛЮЧЕН' if bot_enabled else '🔴 ВЫКЛЮЧЕН'}\n"
+        f"Время работы: {int(time.time() - bot_start_time)} сек\n\n"
+        "Доступные функции:"
+    )
+    
+    buttons = get_admin_buttons()
+    
+    if message_id:
+        edit_message(user_id, message_id, text, buttons)
+    else:
+        send_message(user_id, text, buttons)
+
+def show_all_users(user_id, message_id):
+    if int(user_id) != int(ADMIN_USER_ID):
+        return
+    
+    users = get_all_users()
+    text = "👥 <b>Все пользователи</b>\n\n"
+    
+    for user in users:
+        status_emojis = {
+            "status_on": "🟢",
+            "status_pause": "🟡", 
+            "status_off": "🔴",
+            "status_unknown": "❓"
+        }
+        emoji = status_emojis.get(user['last_status'], "❓")
+        text += f"{emoji} {user['group_name']} (ID: {user['user_id']})\n"
+    
+    edit_message(user_id, message_id, text, get_admin_buttons())
+
+def show_bot_management(user_id, message_id):
+    if int(user_id) != int(ADMIN_USER_ID):
+        return
+    
+    text = (
+        "🔧 <b>Управление ботом</b>\n\n"
+        f"Текущий статус: {'🟢 ВКЛЮЧЕН' if bot_enabled else '🔴 ВЫКЛЮЧЕН'}\n"
+    )
+    
+    if not bot_enabled and bot_disable_reason:
+        text += f"Причина отключения: {bot_disable_reason}\n"
+    
+    buttons = []
+    if bot_enabled:
+        buttons.append([{"text": "🔴 Выключить бота", "callback_data": "admin_disable_bot"}])
+    else:
+        buttons.append([{"text": "🟢 Включить бота", "callback_data": "admin_enable_bot"}])
+    
+    buttons.append([{"text": "🔙 Назад", "callback_data": "admin_panel"}])
+    
+    edit_message(user_id, message_id, text, buttons)
+
+def get_global_stats():
+    conn = get_db_connection()
+    
+    # Получаем последние статусы всех пользователей
+    latest_statuses = conn.execute('''
+        SELECT ss.user_id, ss.status, u.group_name
+        FROM server_statuses ss
+        INNER JOIN (
+            SELECT user_id, MAX(created_at) as max_date
+            FROM server_statuses
+            GROUP BY user_id
+        ) latest ON ss.user_id = latest.user_id AND ss.created_at = latest.max_date
+        INNER JOIN users u ON ss.user_id = u.user_id
+    ''').fetchall()
+    conn.close()
+    
+    # Считаем статистику
+    stats = {"status_on": 0, "status_pause": 0, "status_off": 0, "status_unknown": 0}
+    for status in latest_statuses:
+        if status['status'] in stats:
+            stats[status['status']] += 1
+    
+    return {
+        'total_servers': len(latest_statuses),
+        'stats': stats
+    }
+
+# 🔧 WEBHOOK И FLASK РОУТЫ
+@app.route('/')
+def home():
+    stats = get_global_stats()
+    uptime = int(time.time() - bot_start_time)
+    uptime_str = f"{uptime // 3600}ч {(uptime % 3600) // 60}м {uptime % 60}с"
+    
+    return f"""
+    <html>
+        <head>
+            <title>🤖 Бот управления серверами</title>
+            <meta charset="utf-8">
+        </head>
+        <body style="font-family: Arial, sans-serif; text-align: center; padding: 20px;">
+            <h1>🤖 Бот управления статусами серверов</h1>
+            <p><strong>🟢 Статус: ONLINE</strong></p>
+            <p>⏰ Время работы: {uptime_str}</p>
+            <p>👥 Пользователей: {stats['total_servers']}</p>
+            <p>⏰ Текущее время: {get_current_time()}</p>
+        </body>
+    </html>
+    """
+
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    if request.method == 'POST':
+        update = request.get_json()
+        if update:
+            process_update(update)
+            return 'ok', 200
+    return 'error', 400
+
+@app.route('/health')
+def health():
+    return 'OK', 200
+
+# 🚀 ЗАПУСК БОТА
+def run_flask():
+    port = int(os.environ.get('PORT', 10000))
+    app.run(host='0.0.0.0', port=port, debug=False)
+
+def keep_alive():
+    t = Thread(target=run_flask)
+    t.daemon = True
+    t.start()
+
+def telegram_bot():
+    logger.info("🤖 Бот управления серверами запущен!")
+    logger.info("⏰ Часовой пояс по умолчанию: Asia/Yekaterinburg")
+    logger.info("💾 Используется SQLite база данных")
+    logger.info("🚀 Бот готов к работе!")
+    
+    last_update_id = 0
+    
+    while True:
+        try:
+            data = safe_request(
+                f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates",
+                {"offset": last_update_id + 1, "timeout": 20, "limit": 10},
+                "POST",
+                timeout=25
+            )
+            
+            if data and data.get("ok"):
+                updates = data["result"]
+                
+                if updates:
+                    logger.info(f"📨 Получено обновлений: {len(updates)}")
+                
+                for update in updates:
+                    last_update_id = update["update_id"]
+                    process_update(update)
+                
+                time.sleep(0.5)
+            else:
+                time.sleep(2)
+            
+        except Exception as e:
+            logger.error(f"💥 Ошибка в основном цикле: {e}")
+            time.sleep(5)
+
+if __name__ == "__main__":
+    keep_alive()
+    telegram_bot()
