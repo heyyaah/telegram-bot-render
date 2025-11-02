@@ -13,10 +13,11 @@ app = Flask(__name__)
 bot_start_time = time.time()
 last_activity = time.time()
 last_server_status = "unknown"
+user_states = {}  # Хранилище состояний пользователей
 
 # ✅ ВАШИ ДАННЫЕ:
 BOT_TOKEN = "7713217127:AAG-uyvouLumogKf53B76aP7AsaNHVka4O8"
-ALLOWED_USER_ID = 8081350794  # ⚠️ ТОЛЬКО ВАШ ЛС
+ALLOWED_USER_ID = 8081350794
 GROUP_CHAT_ID = -1002274407466
 TARGET_THREAD_ID = 10
 TARGET_MESSAGE_ID = 3612
@@ -47,8 +48,8 @@ def health():
     return "OK", 200
 
 print("=" * 60)
-print("🟢 БОТ ДЛЯ РАБОТЫ ТОЛЬКО В ЛИЧНЫХ СООБЩЕНИЯХ")
-print("⚡ Работает только в ЛС с пользователем 8081350794")
+print("🟢 БОТ С ОТПРАВКОЙ СООБЩЕНИЙ В ТЕМУ")
+print("⚡ Работает только в ЛС + отправка сообщений")
 print("=" * 60)
 
 socket.setdefaulttimeout(10)
@@ -77,7 +78,7 @@ def safe_request(url, data=None, method="GET", timeout=8):
         return None
 
 def edit_group_message(text):
-    """Редактирование сообщения в группе (только это действие вне ЛС)"""
+    """Редактирование сообщения в группе"""
     payload = {
         "chat_id": GROUP_CHAT_ID, 
         "message_id": TARGET_MESSAGE_ID, 
@@ -97,6 +98,32 @@ def edit_group_message(text):
         return True
     else:
         print(f"❌ Ошибка обновления сообщения в группе")
+        return False
+
+def send_custom_message_to_topic(text):
+    """Отправка сообщения с вашим текстом В ТЕМУ"""
+    payload = {
+        "chat_id": GROUP_CHAT_ID, 
+        "text": text, 
+        "parse_mode": "HTML",
+        "message_thread_id": TARGET_THREAD_ID  # ⚠️ ОТПРАВЛЯЕМ В ТЕМУ
+    }
+    
+    result = safe_request(
+        f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", 
+        payload, 
+        "POST",
+        timeout=5
+    )
+    
+    if result and result.get('ok'):
+        message_id = result["result"]["message_id"]
+        print(f"✅ Сообщение отправлено в тему {TARGET_THREAD_ID}")
+        print(f"📝 Текст: {text[:100]}...")
+        print(f"💬 ID нового сообщения: {message_id}")
+        return True
+    else:
+        print(f"❌ Ошибка отправки сообщения в тему {TARGET_THREAD_ID}")
         return False
 
 def send_message_to_user(chat_id, text, buttons=None):
@@ -137,7 +164,8 @@ status_buttons = [[
 
 # Главное меню
 main_menu_buttons = [[
-    {"text": "⚡ Управление статусом", "callback_data": "manage_status"}
+    {"text": "⚡ Управление статусом", "callback_data": "manage_status"},
+    {"text": "📝 Отправить сообщение", "callback_data": "send_message"}
 ]]
 
 # Кнопки отмены
@@ -162,18 +190,19 @@ def update_server_status(server_status):
 
 def process_update(update):
     """Обработка одного обновления - ТОЛЬКО ЛС"""
-    global last_activity, last_server_status
+    global last_activity, last_server_status, user_states
     last_activity = time.time()
     
     # Получаем информацию о сообщении
     user_id = None
     chat_id = None
+    message_text = ""
     is_private_chat = False
     
     if "message" in update:
         user_id = update["message"]["from"]["id"]
         chat_id = update["message"]["chat"]["id"]
-        # Проверяем что это личный чат (ID пользователя == ID чата)
+        message_text = update["message"].get("text", "")
         is_private_chat = (user_id == chat_id)
         
     elif "callback_query" in update:
@@ -188,6 +217,26 @@ def process_update(update):
     
     print(f"💬 Обрабатываю сообщение в ЛС от пользователя {user_id}")
     
+    # Если пользователь в состоянии ожидания сообщения для отправки
+    if user_id in user_states and user_states[user_id] == "waiting_for_message":
+        if "message" in update and message_text:
+            # Отправляем сообщение В ТЕМУ
+            if send_custom_message_to_topic(message_text):
+                send_message_to_user(chat_id, f"✅ <b>Сообщение успешно отправлено в тему {TARGET_THREAD_ID}!</b>")
+            else:
+                send_message_to_user(chat_id, f"❌ <b>Ошибка отправки сообщения!</b>")
+            
+            # Сбрасываем состояние пользователя
+            user_states[user_id] = None
+            
+            # Возвращаем в главное меню
+            send_message_to_user(
+                chat_id,
+                "🤖 <b>Управление статусом сервера</b>\n\nВыберите действие:",
+                main_menu_buttons
+            )
+            return True
+    
     # Команда /start
     if "message" in update and update["message"].get("text") == "/start":
         send_message_to_user(
@@ -196,6 +245,7 @@ def process_update(update):
             "Этот бот работает только в личных сообщениях.\n\n"
             "Функции:\n"
             "• ⚡ Управление статусом сервера в группе\n"
+            "• 📝 Отправка сообщений в тему\n"
             "• 📊 Просмотр текущего статуса\n\n"
             "Выберите действие:",
             main_menu_buttons
@@ -224,8 +274,25 @@ def process_update(update):
             safe_request(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText", edit_payload, "POST")
             return True
             
+        elif data == "send_message":
+            # Переходим в режим отправки сообщения
+            user_states[user_id] = "waiting_for_message"
+            
+            edit_payload = {
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": f"📝 <b>Отправка сообщения в тему {TARGET_THREAD_ID}</b>\n\n"
+                        "Напишите текст сообщения, которое будет отправлено в указанную тему:",
+                "parse_mode": "HTML",
+                "reply_markup": {"inline_keyboard": cancel_buttons}
+            }
+            safe_request(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText", edit_payload, "POST")
+            return True
+            
         elif data == "back_to_main":
             # Возврат в главное меню
+            user_states[user_id] = None
+            
             edit_payload = {
                 "chat_id": chat_id,
                 "message_id": message_id,
@@ -260,12 +327,7 @@ def process_update(update):
                             f"💬 Сообщение: {TARGET_MESSAGE_ID}\n\n"
                             f"Выберите действие:",
                     "parse_mode": "HTML",
-                    "reply_markup": {
-                        "inline_keyboard": [
-                            [{"text": "⚡ Управление статусом", "callback_data": "manage_status"}],
-                            [{"text": "🔄 Обновить еще раз", "callback_data": "manage_status"}]
-                        ]
-                    }
+                    "reply_markup": {"inline_keyboard": main_menu_buttons}
                 }
                 safe_request(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText", edit_payload, "POST")
                 print(f"✅ Статус сервера изменен: {data}")
@@ -290,7 +352,7 @@ def process_update(update):
         send_message_to_user(
             chat_id,
             "🤖 <b>Управление статусом сервера</b>\n\n"
-            "Используйте кнопки для управления статусом.\n\n"
+            "Используйте кнопки для управления.\n\n"
             "Доступные команды:\n"
             "• /start - показать меню управления",
             main_menu_buttons
@@ -306,6 +368,7 @@ def telegram_bot():
     print(f"💬 Управляет сообщением: {TARGET_MESSAGE_ID}")
     print(f"🏷️  В теме: {TARGET_THREAD_ID}")
     print(f"👥 В группе: {GROUP_CHAT_ID}")
+    print("📝 Функция отправки сообщений активирована")
     print("⚡ Бот игнорирует все сообщения не из ЛС")
     print("=" * 60)
     
