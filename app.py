@@ -10,7 +10,13 @@ import pytz
 from collections import defaultdict
 import os
 import logging
-import psycopg2
+try:
+    import psycopg2
+except ImportError:
+    import subprocess
+    import sys
+    subprocess.check_call([sys.executable, "-m", "pip", "install", "psycopg2-binary"])
+    import psycopg2
 from urllib.parse import urlparse
 
 # Настройка логирования
