@@ -3,5 +3,20 @@ services:
     name: telegram-bot
     env: python
     plan: free
+    region: frankfurt
     buildCommand: pip install -r requirements.txt
-    startCommand: python app.py
+    startCommand: python bot.py
+    envVars:
+      - key: BOT_TOKEN
+        value: "7713217127:AAG-uyvouLumogKf53B76aP7AsaNHVka4O8"
+      - key: ADMIN_USER_ID
+        value: "8081350794"
+      - key: DATABASE_URL
+        fromDatabase:
+          name: telegram-bot-db
+          property: connectionString
+
+databases:
+  - name: telegram-bot-db
+    plan: free
+    region: frankfurt
