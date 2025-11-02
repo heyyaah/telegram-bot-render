@@ -1,4 +1,4 @@
-from flask import Flask, request
+from flask import Flask, request, jsonify
 from threading import Thread
 import urllib.request
 import urllib.parse
@@ -294,6 +294,37 @@ def notify_subscribers(user_id, new_status):
             send_message(sub['subscriber_id'], notification_text)
         except Exception as e:
             logger.error(f"Ошибка отправки уведомления подписчику {sub['subscriber_id']}: {e}")
+
+# ⚙️ АДМИН-ФУНКЦИИ
+def get_all_users():
+    conn = get_db_connection()
+    users = conn.execute('''
+        SELECT u.*, 
+               (SELECT status FROM server_statuses ss 
+                WHERE ss.user_id = u.user_id 
+                ORDER BY ss.created_at DESC LIMIT 1) as last_status,
+               (SELECT COUNT(*) FROM subscriptions s WHERE s.target_user_id = u.user_id) as subscribers_count
+        FROM users u
+    ''').fetchall()
+    conn.close()
+    return users
+
+def broadcast_message(text):
+    conn = get_db_connection()
+    users = conn.execute('SELECT user_id FROM users').fetchall()
+    conn.close()
+    
+    success_count = 0
+    for user in users:
+        if send_message(user['user_id'], text):
+            success_count += 1
+    
+    return success_count
+
+def set_bot_status(enabled, reason=""):
+    global bot_enabled, bot_disable_reason
+    bot_enabled = enabled
+    bot_disable_reason = reason
 
 # 🎯 КНОПКИ И ИНТЕРФЕЙС
 def get_main_menu_buttons():
