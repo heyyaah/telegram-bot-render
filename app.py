@@ -12,6 +12,8 @@ app = Flask(__name__)
 # Глобальные переменные
 bot_start_time = time.time()
 last_activity = time.time()
+initialized = False
+target_message_id = None
 
 @app.route('/')
 def home():
@@ -24,10 +26,10 @@ def home():
             <h1>🟢 Бот управления сервером</h1>
             <p><strong>Статус: ONLINE</strong></p>
             <p>Время работы: {int(time.time() - bot_start_time)} сек</p>
-            <p>Последняя активность: {int(time.time() - last_activity)} сек назад</p>
+            <p>Инициализирован: {'✅ Да' if initialized else '❌ Нет'}</p>
+            <p>ID сообщения: {target_message_id if target_message_id else 'Не создано'}</p>
             <p>👤 Пользователь: 8081350794</p>
             <p>🏷️ Тема: 10</p>
-            <p>💬 Сообщение: 1988</p>
             <p>👥 Группа: -1002274407466</p>
         </body>
     </html>
@@ -40,18 +42,17 @@ def health():
     return "OK", 200
 
 print("=" * 60)
-print("🟢 БОТ ЗАПУЩЕН НА RENDER.COM")
-print("⚡ Версия с защитой от зависаний")
+print("🟢 БОТ С АВТО-ИНИЦИАЛИЗАЦИЕЙ")
+print("⚡ Бот сам создаст и будет редактировать сообщение")
 print("=" * 60)
 
 # ✅ ВАШИ ДАННЫЕ:
 BOT_TOKEN = "7713217127:AAG-uyvouLumogKf53B76aP7AsaNHVka4O8"
 ALLOWED_USER_ID = 8081350794        # Ваш User ID
-TARGET_MESSAGE_ID = 1988            # ID сообщения которое меняем
 GROUP_CHAT_ID = -1002274407466      # ID группы
 TARGET_THREAD_ID = 10               # ID темы
 
-# Устанавливаем таймаут для socket (важно!)
+# Устанавливаем таймаут для socket
 socket.setdefaulttimeout(10)
 
 def safe_request(url, data=None, method="GET", timeout=8):
@@ -69,7 +70,6 @@ def safe_request(url, data=None, method="GET", timeout=8):
         else:
             req = urllib.request.Request(url)
         
-        # Используем более короткий таймаут
         response = urllib.request.urlopen(req, timeout=timeout)
         result = json.loads(response.read().decode())
         return result
@@ -84,19 +84,63 @@ def safe_request(url, data=None, method="GET", timeout=8):
         print(f"⚠️ Неожиданная ошибка: {e}")
         return None
 
+def initialize_bot():
+    """Инициализация бота - создание сообщения в группе"""
+    global initialized, target_message_id
+    
+    print("🔧 Начинаю инициализацию бота...")
+    
+    payload = {
+        "chat_id": GROUP_CHAT_ID, 
+        "text": "❌ <b>Сервер выключен!</b>\n\n⚡ <i>Бот инициализирован и готов к работе</i>", 
+        "parse_mode": "HTML"
+    }
+    
+    # Если указана тема, добавляем thread_id
+    if TARGET_THREAD_ID != 0:
+        payload["message_thread_id"] = TARGET_THREAD_ID
+    
+    for attempt in range(3):
+        print(f"🔄 Попытка {attempt + 1}: создаю сообщение...")
+        
+        result = safe_request(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", 
+            payload, 
+            "POST",
+            timeout=10
+        )
+        
+        if result and result.get('ok'):
+            target_message_id = result["result"]["message_id"]
+            initialized = True
+            print(f"✅ Сообщение создано! ID: {target_message_id}")
+            print(f"🏷️  Тема: {TARGET_THREAD_ID}")
+            print(f"👥 Группа: {GROUP_CHAT_ID}")
+            return True
+        else:
+            print(f"❌ Попытка {attempt + 1} не удалась")
+            time.sleep(2)
+    
+    print("💥 Не удалось создать сообщение после 3 попыток")
+    return False
+
 def edit_message_safe(text):
     """Безопасное изменение сообщения"""
-    print(f"✏️ Изменяю сообщение {TARGET_MESSAGE_ID} в теме {TARGET_THREAD_ID}")
+    if not initialized or not target_message_id:
+        print("❌ Сообщение не инициализировано!")
+        return False
+    
+    print(f"✏️ Изменяю сообщение {target_message_id} в теме {TARGET_THREAD_ID}")
     print(f"📝 Текст: {text[:50]}...")
     
     payload = {
         "chat_id": GROUP_CHAT_ID, 
-        "message_id": TARGET_MESSAGE_ID, 
+        "message_id": target_message_id, 
         "text": text, 
         "parse_mode": "HTML"
     }
     
-    for attempt in range(3):  # 3 попытки
+    for attempt in range(3):
         result = safe_request(
             f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText", 
             payload, 
@@ -108,7 +152,7 @@ def edit_message_safe(text):
             print("✅ Сообщение успешно изменено")
             return True
         else:
-            print(f"🔄 Попытка {attempt + 1} не удалась, пробую снова...")
+            print(f"🔄 Попытка {attempt + 1} не удалась")
             time.sleep(1)
     
     print("❌ Не удалось изменить сообщение после 3 попыток")
@@ -150,9 +194,9 @@ control_buttons = [[
 ]]
 
 status_messages = {
-    "status_on": "✅ <b>Сервер включён!</b>\nКод сервера: <code>kad4b1kj</code>",
-    "status_pause": "⚠️ <b>Сервер приостановлен!</b>",
-    "status_off": "❌ <b>Сервер выключен!</b>"
+    "status_on": "✅ <b>Сервер включён!</b>\nКод сервера: <code>kad4b1kj</code>\n\n⚡ <i>Бот активен и работает</i>",
+    "status_pause": "⚠️ <b>Сервер приостановлен!</b>\n\n⚡ <i>Бот активен и работает</i>",
+    "status_off": "❌ <b>Сервер выключен!</b>\n\n⚡ <i>Бот активен и работает</i>"
 }
 
 def process_update(update):
@@ -177,13 +221,18 @@ def process_update(update):
     # Команда /start
     if "message" in update and update["message"].get("text") == "/start":
         chat_id = update["message"]["chat"]["id"]
+        
+        status_text = "✅ Инициализирован" if initialized else "❌ Не инициализирован"
+        message_id_text = f"💬 ID: {target_message_id}" if target_message_id else "💬 Сообщение не создано"
+        
         success = send_message_safe(
             chat_id,
             f"🤖 <b>Управление статусом сервера</b>\n\n"
             f"🏷️ <b>Тема:</b> {TARGET_THREAD_ID}\n"
-            f"💬 <b>Сообщение:</b> {TARGET_MESSAGE_ID}\n"
-            f"👥 <b>Группа:</b> {GROUP_CHAT_ID}\n\n"
-            f"Выберите статус:",
+            f"👥 <b>Группа:</b> {GROUP_CHAT_ID}\n"
+            f"🔧 <b>Статус бота:</b> {status_text}\n"
+            f"{message_id_text}\n\n"
+            f"Выберите статус сервера:",
             control_buttons
         )
         if success:
@@ -201,6 +250,27 @@ def process_update(update):
         # Сразу отвечаем на callback (убираем часики)
         answer_callback_safe(callback["id"])
         
+        if not initialized:
+            # Если бот не инициализирован, пытаемся инициализировать
+            print("🔄 Бот не инициализирован, пытаюсь создать сообщение...")
+            if not initialize_bot():
+                # Сообщаем об ошибке
+                error_payload = {
+                    "chat_id": callback["message"]["chat"]["id"],
+                    "message_id": callback["message"]["message_id"],
+                    "text": "❌ <b>Ошибка!</b>\nНе удалось создать сообщение в группе.\n\n"
+                            "Проверьте права бота в группе.",
+                    "parse_mode": "HTML",
+                    "reply_markup": {"inline_keyboard": control_buttons}
+                }
+                safe_request(
+                    f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText",
+                    error_payload,
+                    "POST",
+                    timeout=5
+                )
+                return True
+        
         # Изменяем сообщение
         new_text = status_messages.get(status, "❌ Неизвестный статус")
         edit_success = edit_message_safe(new_text)
@@ -212,7 +282,7 @@ def process_update(update):
                 "message_id": callback["message"]["message_id"],
                 "text": f"🎯 <b>Статус установлен!</b>\n\n{new_text}\n\n"
                         f"🏷️ Тема: {TARGET_THREAD_ID}\n"
-                        f"💬 Сообщение: {TARGET_MESSAGE_ID}\n\n"
+                        f"💬 Сообщение: {target_message_id}\n\n"
                         f"Выберите новый статус:",
                 "parse_mode": "HTML",
                 "reply_markup": {"inline_keyboard": control_buttons}
@@ -232,10 +302,8 @@ def process_update(update):
                 "chat_id": callback["message"]["chat"]["id"],
                 "message_id": callback["message"]["message_id"],
                 "text": f"❌ <b>Ошибка!</b>\nНе удалось изменить сообщение.\n\n"
-                        f"Проверьте:\n"
-                        f"• ID сообщения: {TARGET_MESSAGE_ID}\n"
-                        f"• Права бота в группе\n"
-                        f"• Существует ли сообщение",
+                        f"ID сообщения: {target_message_id}\n"
+                        f"Попробуйте еще раз",
                 "parse_mode": "HTML",
                 "reply_markup": {"inline_keyboard": control_buttons}
             }
@@ -255,10 +323,16 @@ def telegram_bot():
     print("🤖 Telegram бот запущен!")
     print(f"👤 Разрешенный пользователь: {ALLOWED_USER_ID}")
     print(f"🏷️  ID темы: {TARGET_THREAD_ID}")
-    print(f"💬 ID сообщения: {TARGET_MESSAGE_ID}")
     print(f"👥 ID группы: {GROUP_CHAT_ID}")
-    print("⚡ Защита от зависаний активирована")
+    print("⚡ Бот создаст сообщение автоматически при первом нажатии кнопки")
     print("=" * 60)
+    
+    # Пытаемся инициализировать при запуске
+    print("🔧 Пытаюсь инициализировать бота при запуске...")
+    if initialize_bot():
+        print("✅ Бот успешно инициализирован при запуске!")
+    else:
+        print("ℹ️ Бот будет инициализирован при первом нажатии кнопки")
     
     last_update_id = 0
     error_count = 0
@@ -275,7 +349,7 @@ def telegram_bot():
                     "limit": 10
                 },
                 "POST",
-                timeout=25  # Таймаут больше чем polling
+                timeout=25
             )
             
             if data and data.get("ok"):
@@ -289,7 +363,6 @@ def telegram_bot():
                     last_update_id = update["update_id"]
                     process_update(update)
                 
-                # Короткая пауза между обработками
                 time.sleep(0.5)
                 
             else:
