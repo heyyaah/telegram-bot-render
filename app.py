@@ -252,6 +252,21 @@ def generate_status_text(user_id, status):
 
 💡 Используйте бота для управления статусом"""
 
+def send_custom_message(user_id, text):
+    """📝 ОТПРАВКА СООБЩЕНИЯ В ГРУППУ"""
+    conn = get_db_connection()
+    user = conn.execute('SELECT * FROM users WHERE user_id = ?', (user_id,)).fetchone()
+    conn.close()
+    
+    if user:
+        result = send_message(
+            user['group_id'], 
+            text,
+            thread_id=user['thread_id'] if user['thread_id'] else None
+        )
+        return result and result.get('ok')
+    return False
+
 def get_subscriber_count(target_user_id):
     conn = get_db_connection()
     count = conn.execute('SELECT COUNT(*) as count FROM subscriptions WHERE target_user_id = ?', (target_user_id,)).fetchone()
@@ -294,6 +309,142 @@ def notify_subscribers(user_id, new_status):
             send_message(sub['subscriber_id'], notification_text)
         except Exception as e:
             logger.error(f"Ошибка отправки уведомления подписчику {sub['subscriber_id']}: {e}")
+
+# 🔔 СИСТЕМА ПОДПИСОК
+def subscribe_to_server(subscriber_id, target_user_id):
+    conn = get_db_connection()
+    
+    # Проверяем, не подписан ли уже
+    existing = conn.execute('''
+        SELECT id FROM subscriptions 
+        WHERE subscriber_id = ? AND target_user_id = ?
+    ''', (subscriber_id, target_user_id)).fetchone()
+    
+    if existing:
+        conn.close()
+        return False, "Вы уже подписаны на этот сервер"
+    
+    # Проверяем, существует ли целевой пользователь
+    target_user = conn.execute('SELECT group_name FROM users WHERE user_id = ?', (target_user_id,)).fetchone()
+    if not target_user:
+        conn.close()
+        return False, "Сервер не найден"
+    
+    # Создаем подписку
+    conn.execute('''
+        INSERT INTO subscriptions (subscriber_id, target_user_id)
+        VALUES (?, ?)
+    ''', (subscriber_id, target_user_id))
+    conn.commit()
+    conn.close()
+    
+    return True, f"✅ Вы подписались на сервер {target_user['group_name']}"
+
+def unsubscribe_from_server(subscriber_id, target_user_id):
+    conn = get_db_connection()
+    
+    # Получаем информацию о сервере для сообщения
+    target_user = conn.execute('SELECT group_name FROM users WHERE user_id = ?', (target_user_id,)).fetchone()
+    
+    # Удаляем подписку
+    conn.execute('''
+        DELETE FROM subscriptions 
+        WHERE subscriber_id = ? AND target_user_id = ?
+    ''', (subscriber_id, target_user_id))
+    conn.commit()
+    conn.close()
+    
+    if target_user:
+        return True, f"❌ Вы отписались от сервера {target_user['group_name']}"
+    else:
+        return True, "❌ Подписка удалена"
+
+def show_subscriptions(user_id, message_id):
+    """🔔 ПОКАЗ ПОДПИСОК"""
+    conn = get_db_connection()
+    
+    # Получаем подписки пользователя
+    subscriptions = conn.execute('''
+        SELECT u.user_id, u.group_name, ss.status
+        FROM subscriptions s
+        JOIN users u ON s.target_user_id = u.user_id
+        LEFT JOIN (
+            SELECT user_id, status, MAX(created_at) as last_update
+            FROM server_statuses
+            GROUP BY user_id
+        ) ss ON u.user_id = ss.user_id
+        WHERE s.subscriber_id = ?
+        ORDER BY u.group_name
+    ''', (user_id,)).fetchall()
+    
+    # Получаем доступные для подписки серверы (кроме своих и уже подписанных)
+    available_servers = conn.execute('''
+        SELECT u.user_id, u.group_name, ss.status
+        FROM users u
+        LEFT JOIN (
+            SELECT user_id, status, MAX(created_at) as last_update
+            FROM server_statuses
+            GROUP BY user_id
+        ) ss ON u.user_id = ss.user_id
+        WHERE u.user_id != ? 
+        AND u.user_id NOT IN (
+            SELECT target_user_id FROM subscriptions WHERE subscriber_id = ?
+        )
+        ORDER BY u.group_name
+    ''', (user_id, user_id)).fetchall()
+    
+    conn.close()
+    
+    status_emojis = {
+        "status_on": "🟢",
+        "status_pause": "🟡",
+        "status_off": "🔴",
+        "status_unknown": "❓"
+    }
+    
+    text = "🔔 <b>Управление подписками</b>\n\n"
+    
+    # Текущие подписки
+    if subscriptions:
+        text += "<b>Ваши подписки:</b>\n"
+        for sub in subscriptions:
+            emoji = status_emojis.get(sub['status'], "❓")
+            text += f"{emoji} {sub['group_name']}\n"
+        text += "\n"
+    else:
+        text += "❌ <i>У вас нет активных подписок</i>\n\n"
+    
+    # Доступные серверы
+    if available_servers:
+        text += "<b>Доступные для подписки:</b>\n"
+        for server in available_servers:
+            emoji = status_emojis.get(server['status'], "❓")
+            text += f"{emoji} {server['group_name']}\n"
+    else:
+        text += "📭 <i>Нет доступных серверов для подписки</i>\n"
+    
+    # Создаем кнопки
+    buttons = []
+    
+    # Кнопки для подписки на доступные серверы
+    for server in available_servers:
+        buttons.append([{
+            "text": f"✅ Подписаться на {server['group_name']}",
+            "callback_data": f"subscribe_{server['user_id']}"
+        }])
+    
+    # Кнопки для отписки от текущих подписок
+    for sub in subscriptions:
+        buttons.append([{
+            "text": f"❌ Отписаться от {sub['group_name']}",
+            "callback_data": f"unsubscribe_{sub['user_id']}"
+        }])
+    
+    # Кнопка обновления и назад
+    buttons.append([{"text": "🔄 Обновить", "callback_data": "subscriptions"}])
+    buttons.append([{"text": "🔙 Назад", "callback_data": "back_to_main"}])
+    
+    edit_message(user_id, message_id, text, buttons)
 
 # ⚙️ АДМИН-ФУНКЦИИ
 def get_all_users():
@@ -428,6 +579,16 @@ def process_message(message):
                     send_message(user_id, "❌ Неверный формат. Используйте: group_id,thread_id,message_id,название_группы")
             except ValueError:
                 send_message(user_id, "❌ Ошибка в данных. Проверьте числовые значения.")
+            
+            user_states[user_id] = None
+            return True
+            
+        elif state == "waiting_message":
+            # 📝 ОТПРАВКА СООБЩЕНИЯ В ГРУППУ
+            if send_custom_message(user_id, text):
+                send_message(user_id, "✅ Сообщение отправлено в группу!", buttons=get_main_menu_buttons())
+            else:
+                send_message(user_id, "❌ Ошибка отправки сообщения!", buttons=get_main_menu_buttons())
             
             user_states[user_id] = None
             return True
@@ -611,6 +772,42 @@ def process_callback(callback):
                     "🔴 <b>Выключение бота</b>\n\n"
                     "Введите причину выключения:",
                     [[{"text": "🔙 Отмена", "callback_data": "admin_manage_bot"}]])
+        return True
+    
+    # 📝 ОБРАБОТКА ОТПРАВКИ СООБЩЕНИЯ
+    elif data == "send_message":
+        user_states[user_id] = "waiting_message"
+        edit_message(user_id, message_id, 
+                    "📝 <b>Отправка сообщения в группу</b>\n\n"
+                    "Введите текст сообщения, которое будет отправлено в вашу группу:",
+                    [[{"text": "🔙 Отмена", "callback_data": "back_to_main"}]])
+        return True
+    
+    # 🔔 ОБРАБОТКА ПОДПИСОК
+    elif data.startswith("subscribe_"):
+        target_user_id = int(data.split("_")[1])
+        success, message = subscribe_to_server(user_id, target_user_id)
+        
+        if success:
+            show_subscriptions(user_id, message_id)
+            send_message(user_id, message)
+        else:
+            send_message(user_id, f"❌ {message}")
+        return True
+    
+    elif data.startswith("unsubscribe_"):
+        target_user_id = int(data.split("_")[1])
+        success, message = unsubscribe_from_server(user_id, target_user_id)
+        
+        if success:
+            show_subscriptions(user_id, message_id)
+            send_message(user_id, message)
+        else:
+            send_message(user_id, f"❌ {message}")
+        return True
+    
+    elif data == "subscriptions":
+        show_subscriptions(user_id, message_id)
         return True
     
     # Остальные обработчики
@@ -802,119 +999,6 @@ def show_stats(user_id, message_id=None):
     else:
         send_message(user_id, text, [[{"text": "🔙 Назад", "callback_data": "back_to_main"}]])
 
-def show_settings(user_id, message_id=None):
-    conn = get_db_connection()
-    user = conn.execute('SELECT * FROM users WHERE user_id = ?', (user_id,)).fetchone()
-    conn.close()
-    
-    group_info = "❌ Не настроено"
-    if user:
-        group_info = f"{user['group_name']}\nID: {user['group_id']}\nСообщение: {user['message_id']}"
-        if user['thread_id']:
-            group_info += f"\nТема: {user['thread_id']}"
-    
-    text = (
-        "⚙️ <b>Настройки</b>\n\n"
-        f"👤 Ваш ID: {user_id}\n"
-        f"🕐 Часовой пояс: {get_user_timezone(user_id)}\n"
-        f"⏰ Текущее время: {get_current_time(user_id)}\n\n"
-        f"📋 Настройки группы:\n{group_info}"
-    )
-    
-    buttons = get_settings_buttons(user_id)
-    
-    if message_id:
-        edit_message(user_id, message_id, text, buttons)
-    else:
-        send_message(user_id, text, buttons)
-
-def show_admin_panel(user_id, message_id=None):
-    if int(user_id) != int(ADMIN_USER_ID):
-        return
-    
-    stats = get_global_stats()
-    text = (
-        "👑 <b>Админ-панель</b>\n\n"
-        f"Всего пользователей: {len(get_all_users())}\n"
-        f"Статус бота: {'🟢 ВКЛЮЧЕН' if bot_enabled else '🔴 ВЫКЛЮЧЕН'}\n"
-        f"Время работы: {int(time.time() - bot_start_time)} сек\n\n"
-        "Доступные функции:"
-    )
-    
-    buttons = get_admin_buttons()
-    
-    if message_id:
-        edit_message(user_id, message_id, text, buttons)
-    else:
-        send_message(user_id, text, buttons)
-
-def show_all_users(user_id, message_id):
-    if int(user_id) != int(ADMIN_USER_ID):
-        return
-    
-    users = get_all_users()
-    text = "👥 <b>Все пользователи</b>\n\n"
-    
-    for user in users:
-        status_emojis = {
-            "status_on": "🟢",
-            "status_pause": "🟡", 
-            "status_off": "🔴",
-            "status_unknown": "❓"
-        }
-        emoji = status_emojis.get(user['last_status'], "❓")
-        text += f"{emoji} {user['group_name']} (ID: {user['user_id']})\n"
-    
-    edit_message(user_id, message_id, text, get_admin_buttons())
-
-def show_bot_management(user_id, message_id):
-    if int(user_id) != int(ADMIN_USER_ID):
-        return
-    
-    text = (
-        "🔧 <b>Управление ботом</b>\n\n"
-        f"Текущий статус: {'🟢 ВКЛЮЧЕН' if bot_enabled else '🔴 ВЫКЛЮЧЕН'}\n"
-    )
-    
-    if not bot_enabled and bot_disable_reason:
-        text += f"Причина отключения: {bot_disable_reason}\n"
-    
-    buttons = []
-    if bot_enabled:
-        buttons.append([{"text": "🔴 Выключить бота", "callback_data": "admin_disable_bot"}])
-    else:
-        buttons.append([{"text": "🟢 Включить бота", "callback_data": "admin_enable_bot"}])
-    
-    buttons.append([{"text": "🔙 Назад", "callback_data": "admin_panel"}])
-    
-    edit_message(user_id, message_id, text, buttons)
-
-def get_global_stats():
-    conn = get_db_connection()
-    
-    # Получаем последние статусы всех пользователей
-    latest_statuses = conn.execute('''
-        SELECT ss.user_id, ss.status, u.group_name
-        FROM server_statuses ss
-        INNER JOIN (
-            SELECT user_id, MAX(created_at) as max_date
-            FROM server_statuses
-            GROUP BY user_id
-        ) latest ON ss.user_id = latest.user_id AND ss.created_at = latest.max_date
-        INNER JOIN users u ON ss.user_id = u.user_id
-    ''').fetchall()
-    conn.close()
-    
-    # Считаем статистику
-    stats = {"status_on": 0, "status_pause": 0, "status_off": 0, "status_unknown": 0}
-    for status in latest_statuses:
-        if status['status'] in stats:
-            stats[status['status']] += 1
-    
-    return {
-        'total_servers': len(latest_statuses),
-        'stats': stats
-    }
 
 # 🔧 WEBHOOK И FLASK РОУТЫ
 @app.route('/')
