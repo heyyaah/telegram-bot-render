@@ -12,8 +12,15 @@ app = Flask(__name__)
 # Глобальные переменные
 bot_start_time = time.time()
 last_activity = time.time()
+last_bot_status = "unknown"
 initialized = False
-target_message_id = None
+
+# ✅ ВАШИ ДАННЫЕ:
+BOT_TOKEN = "7713217127:AAG-uyvouLumogKf53B76aP7AsaNHVka4O8"
+ALLOWED_USER_ID = 8081350794
+GROUP_CHAT_ID = -1002274407466
+TARGET_THREAD_ID = 10
+TARGET_MESSAGE_ID = 3612  # ⚠️ ФИКСИРОВАННЫЙ ID СООБЩЕНИЯ
 
 @app.route('/')
 def home():
@@ -27,7 +34,8 @@ def home():
             <p><strong>Статус: ONLINE</strong></p>
             <p>Время работы: {int(time.time() - bot_start_time)} сек</p>
             <p>Инициализирован: {'✅ Да' if initialized else '❌ Нет'}</p>
-            <p>ID сообщения: {target_message_id if target_message_id else 'Не создано'}</p>
+            <p>💬 ID сообщения: {TARGET_MESSAGE_ID}</p>
+            <p>Последний статус сервера: {last_bot_status}</p>
             <p>👤 Пользователь: 8081350794</p>
             <p>🏷️ Тема: 10</p>
             <p>👥 Группа: -1002274407466</p>
@@ -42,21 +50,14 @@ def health():
     return "OK", 200
 
 print("=" * 60)
-print("🟢 БОТ С АВТО-ИНИЦИАЛИЗАЦИЕЙ")
-print("⚡ Бот сам создаст и будет редактировать сообщение")
+print("🟢 БОТ ДЛЯ СООБЩЕНИЯ ID: 3612")
+print("⚡ Редактирует существующее сообщение")
 print("=" * 60)
 
-# ✅ ВАШИ ДАННЫЕ:
-BOT_TOKEN = "7713217127:AAG-uyvouLumogKf53B76aP7AsaNHVka4O8"
-ALLOWED_USER_ID = 8081350794        # Ваш User ID
-GROUP_CHAT_ID = -1002274407466      # ID группы
-TARGET_THREAD_ID = 10               # ID темы
-
-# Устанавливаем таймаут для socket
 socket.setdefaulttimeout(10)
 
 def safe_request(url, data=None, method="GET", timeout=8):
-    """Безопасный запрос с таймаутом и перезапуском"""
+    """Безопасный запрос с таймаутом"""
     try:
         if data and method == "POST":
             data_str = json.dumps(data, ensure_ascii=False)
@@ -74,89 +75,93 @@ def safe_request(url, data=None, method="GET", timeout=8):
         result = json.loads(response.read().decode())
         return result
         
-    except urllib.error.URLError as e:
-        print(f"🌐 Сетевая ошибка: {e}")
-        return None
-    except socket.timeout:
-        print("⏰ Таймаут запроса")
-        return None
     except Exception as e:
-        print(f"⚠️ Неожиданная ошибка: {e}")
+        print(f"⚠️ Ошибка запроса: {e}")
         return None
 
 def initialize_bot():
-    """Инициализация бота - создание сообщения в группе"""
-    global initialized, target_message_id
+    """Проверка доступности сообщения и инициализация"""
+    global initialized, last_bot_status
     
-    print("🔧 Начинаю инициализацию бота...")
+    print(f"🔧 Проверяю доступность сообщения {TARGET_MESSAGE_ID}...")
     
+    # Пытаемся получить информацию о сообщении
     payload = {
         "chat_id": GROUP_CHAT_ID, 
-        "text": "❌ <b>Сервер выключен!</b>\n\n⚡ <i>Бот инициализирован и готов к работе</i>", 
-        "parse_mode": "HTML"
+        "message_id": TARGET_MESSAGE_ID
     }
     
-    # Если указана тема, добавляем thread_id
-    if TARGET_THREAD_ID != 0:
-        payload["message_thread_id"] = TARGET_THREAD_ID
+    result = safe_request(
+        f"https://api.telegram.org/bot{BOT_TOKEN}/getChat", 
+        payload, 
+        "POST",
+        timeout=5
+    )
     
-    for attempt in range(3):
-        print(f"🔄 Попытка {attempt + 1}: создаю сообщение...")
+    if result and result.get('ok'):
+        initialized = True
+        last_bot_status = "ready"
+        print(f"✅ Сообщение {TARGET_MESSAGE_ID} доступно для редактирования!")
         
-        result = safe_request(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage", 
-            payload, 
-            "POST",
-            timeout=10
-        )
-        
-        if result and result.get('ok'):
-            target_message_id = result["result"]["message_id"]
-            initialized = True
-            print(f"✅ Сообщение создано! ID: {target_message_id}")
-            print(f"🏷️  Тема: {TARGET_THREAD_ID}")
-            print(f"👥 Группа: {GROUP_CHAT_ID}")
-            return True
-        else:
-            print(f"❌ Попытка {attempt + 1} не удалась")
-            time.sleep(2)
-    
-    print("💥 Не удалось создать сообщение после 3 попыток")
-    return False
+        # Устанавливаем начальный статус
+        update_bot_status("🟢 <b>Бот запущен!</b>\n\n⚡ Статус сервера: <b>Неизвестен</b>\n💡 Используйте кнопки для управления")
+        return True
+    else:
+        print(f"❌ Сообщение {TARGET_MESSAGE_ID} недоступно или не существует")
+        print("💡 Проверьте:")
+        print(f"   • ID сообщения: {TARGET_MESSAGE_ID}")
+        print(f"   • ID группы: {GROUP_CHAT_ID}") 
+        print(f"   • Права бота в группе")
+        return False
 
-def edit_message_safe(text):
-    """Безопасное изменение сообщения"""
-    if not initialized or not target_message_id:
-        print("❌ Сообщение не инициализировано!")
+def update_bot_status(status_text):
+    """Обновление статуса в сообщении"""
+    global last_bot_status
+    
+    if not initialized:
+        print("❌ Бот не инициализирован!")
         return False
     
-    print(f"✏️ Изменяю сообщение {target_message_id} в теме {TARGET_THREAD_ID}")
-    print(f"📝 Текст: {text[:50]}...")
+    # Добавляем время обновления
+    current_time = time.strftime("%H:%M:%S")
+    full_text = f"{status_text}\n\n⏰ Обновлено: {current_time}"
     
     payload = {
         "chat_id": GROUP_CHAT_ID, 
-        "message_id": target_message_id, 
-        "text": text, 
+        "message_id": TARGET_MESSAGE_ID, 
+        "text": full_text, 
         "parse_mode": "HTML"
     }
     
-    for attempt in range(3):
-        result = safe_request(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText", 
-            payload, 
-            "POST",
-            timeout=5
-        )
-        
-        if result and result.get('ok'):
-            print("✅ Сообщение успешно изменено")
-            return True
-        else:
-            print(f"🔄 Попытка {attempt + 1} не удалась")
-            time.sleep(1)
+    result = safe_request(
+        f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText", 
+        payload, 
+        "POST",
+        timeout=5
+    )
     
-    print("❌ Не удалось изменить сообщение после 3 попыток")
-    return False
+    if result and result.get('ok'):
+        last_bot_status = status_text
+        print(f"✅ Сообщение {TARGET_MESSAGE_ID} обновлено")
+        return True
+    else:
+        print(f"❌ Ошибка обновления сообщения {TARGET_MESSAGE_ID}")
+        return False
+
+def update_server_status(server_status):
+    """Обновление статуса сервера"""
+    global last_bot_status
+    
+    status_messages = {
+        "status_on": "✅ <b>Сервер включён!</b>\nКод сервера: <code>kad4b1kj</code>",
+        "status_pause": "⚠️ <b>Сервер приостановлен!</b>",
+        "status_off": "❌ <b>Сервер выключен!</b>"
+    }
+    
+    server_text = status_messages.get(server_status, "❌ Неизвестный статус")
+    status_text = f"🟢 <b>Бот работает!</b>\n\n⚡ {server_text}"
+    
+    return update_bot_status(status_text)
 
 def send_message_safe(chat_id, text, buttons=None):
     """Безопасная отправка сообщения"""
@@ -186,18 +191,12 @@ def answer_callback_safe(callback_id):
         timeout=3
     )
 
-# Кнопки и статусы
+# Кнопки управления
 control_buttons = [[
     {"text": "🟢 Включен", "callback_data": "status_on"},
     {"text": "🟡 Приостановлен", "callback_data": "status_pause"},
     {"text": "🔴 Выключен", "callback_data": "status_off"}
 ]]
-
-status_messages = {
-    "status_on": "✅ <b>Сервер включён!</b>\nКод сервера: <code>kad4b1kj</code>\n\n⚡ <i>Бот активен и работает</i>",
-    "status_pause": "⚠️ <b>Сервер приостановлен!</b>\n\n⚡ <i>Бот активен и работает</i>",
-    "status_off": "❌ <b>Сервер выключен!</b>\n\n⚡ <i>Бот активен и работает</i>"
-}
 
 def process_update(update):
     """Обработка одного обновления"""
@@ -222,21 +221,18 @@ def process_update(update):
     if "message" in update and update["message"].get("text") == "/start":
         chat_id = update["message"]["chat"]["id"]
         
-        status_text = "✅ Инициализирован" if initialized else "❌ Не инициализирован"
-        message_id_text = f"💬 ID: {target_message_id}" if target_message_id else "💬 Сообщение не создано"
+        status_text = "✅ Да" if initialized else "❌ Нет"
         
-        success = send_message_safe(
+        send_message_safe(
             chat_id,
             f"🤖 <b>Управление статусом сервера</b>\n\n"
             f"🏷️ <b>Тема:</b> {TARGET_THREAD_ID}\n"
-            f"👥 <b>Группа:</b> {GROUP_CHAT_ID}\n"
-            f"🔧 <b>Статус бота:</b> {status_text}\n"
-            f"{message_id_text}\n\n"
+            f"💬 <b>Сообщение:</b> {TARGET_MESSAGE_ID}\n"
+            f"🔧 <b>Доступно:</b> {status_text}\n\n"
             f"Выберите статус сервера:",
             control_buttons
         )
-        if success:
-            print(f"✅ Кнопки отправлены пользователю {chat_id}")
+        print(f"✅ Кнопки отправлены пользователю {chat_id}")
         return True
     
     # Обработка кнопок
@@ -251,103 +247,111 @@ def process_update(update):
         answer_callback_safe(callback["id"])
         
         if not initialized:
-            # Если бот не инициализирован, пытаемся инициализировать
-            print("🔄 Бот не инициализирован, пытаюсь создать сообщение...")
+            # Пытаемся инициализировать
             if not initialize_bot():
-                # Сообщаем об ошибке
-                error_payload = {
+                # Ошибка инициализации
+                edit_payload = {
                     "chat_id": callback["message"]["chat"]["id"],
                     "message_id": callback["message"]["message_id"],
-                    "text": "❌ <b>Ошибка!</b>\nНе удалось создать сообщение в группе.\n\n"
-                            "Проверьте права бота в группе.",
+                    "text": f"❌ <b>Ошибка!</b>\n\n"
+                            f"Не удалось получить доступ к сообщению {TARGET_MESSAGE_ID}.\n\n"
+                            f"Проверьте:\n"
+                            f"• Существует ли сообщение\n"
+                            f"• Права бота в группе\n"
+                            f"• ID сообщения и группы",
                     "parse_mode": "HTML",
                     "reply_markup": {"inline_keyboard": control_buttons}
                 }
-                safe_request(
-                    f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText",
-                    error_payload,
-                    "POST",
-                    timeout=5
-                )
+                safe_request(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText", edit_payload, "POST")
                 return True
         
-        # Изменяем сообщение
-        new_text = status_messages.get(status, "❌ Неизвестный статус")
-        edit_success = edit_message_safe(new_text)
-        
-        # Обновляем сообщение с кнопками
-        if edit_success:
+        # Обновляем статус сервера
+        if update_server_status(status):
+            # Обновляем сообщение с кнопками
             edit_payload = {
                 "chat_id": callback["message"]["chat"]["id"],
                 "message_id": callback["message"]["message_id"],
-                "text": f"🎯 <b>Статус установлен!</b>\n\n{new_text}\n\n"
+                "text": f"🎯 <b>Статус установлен!</b>\n\n"
                         f"🏷️ Тема: {TARGET_THREAD_ID}\n"
-                        f"💬 Сообщение: {target_message_id}\n\n"
+                        f"💬 Сообщение: {TARGET_MESSAGE_ID}\n\n"
                         f"Выберите новый статус:",
                 "parse_mode": "HTML",
                 "reply_markup": {"inline_keyboard": control_buttons}
             }
-            
-            safe_request(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText",
-                edit_payload,
-                "POST",
-                timeout=5
-            )
-            print(f"✅ Статус изменен: {status}")
+            safe_request(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText", edit_payload, "POST")
+            print(f"✅ Статус сервера изменен: {status}")
         else:
             print(f"❌ Ошибка изменения статуса: {status}")
-            # Сообщаем об ошибке пользователю
+            # Сообщаем об ошибке
             error_payload = {
                 "chat_id": callback["message"]["chat"]["id"],
                 "message_id": callback["message"]["message_id"],
-                "text": f"❌ <b>Ошибка!</b>\nНе удалось изменить сообщение.\n\n"
-                        f"ID сообщения: {target_message_id}\n"
-                        f"Попробуйте еще раз",
+                "text": f"❌ <b>Ошибка обновления!</b>\n\n"
+                        f"Не удалось изменить сообщение {TARGET_MESSAGE_ID}.\n"
+                        f"Возможно сообщение было удалено.",
                 "parse_mode": "HTML",
                 "reply_markup": {"inline_keyboard": control_buttons}
             }
-            safe_request(
-                f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText",
-                error_payload,
-                "POST",
-                timeout=5
-            )
+            safe_request(f"https://api.telegram.org/bot{BOT_TOKEN}/editMessageText", error_payload, "POST")
         
         return True
     
     return False
 
+def bot_health_monitor():
+    """Монитор здоровья бота - обновляет статус каждые 5 минут"""
+    while True:
+        try:
+            if initialized:
+                # Обновляем время последней активности
+                current_time = time.strftime("%H:%M:%S")
+                uptime = int(time.time() - bot_start_time)
+                
+                status_text = f"🟢 <b>Бот работает!</b>\n\n⏰ Аптайм: {uptime} сек\n📅 Обновлено: {current_time}"
+                
+                # Если статус сервера не установлен, добавляем информацию
+                if "Сервер" not in last_bot_status:
+                    status_text += "\n\n⚡ Статус сервера: <b>Неизвестен</b>\n💡 Используйте кнопки для управления"
+                
+                update_bot_status(status_text)
+                print("🔍 Монитор здоровья: статус обновлен")
+            
+            time.sleep(300)  # 5 минут
+            
+        except Exception as e:
+            print(f"⚠️ Ошибка в мониторе здоровья: {e}")
+            time.sleep(60)
+
 def telegram_bot():
-    """Основной цикл бота с защитой от зависаний"""
+    """Основной цикл бота"""
     print("🤖 Telegram бот запущен!")
+    print(f"💬 Целевое сообщение: {TARGET_MESSAGE_ID}")
     print(f"👤 Разрешенный пользователь: {ALLOWED_USER_ID}")
     print(f"🏷️  ID темы: {TARGET_THREAD_ID}")
     print(f"👥 ID группы: {GROUP_CHAT_ID}")
-    print("⚡ Бот создаст сообщение автоматически при первом нажатии кнопки")
+    print("🔍 Монитор здоровья активирован")
     print("=" * 60)
     
-    # Пытаемся инициализировать при запуске
-    print("🔧 Пытаюсь инициализировать бота при запуске...")
+    # Инициализация при запуске
     if initialize_bot():
-        print("✅ Бот успешно инициализирован при запуске!")
+        print("✅ Бот успешно инициализирован!")
     else:
-        print("ℹ️ Бот будет инициализирован при первом нажатии кнопки")
+        print("❌ Бот не смог получить доступ к сообщению")
+        print("ℹ️ Бот будет пытаться при каждом нажатии кнопки")
+    
+    # Запускаем монитор здоровья в отдельном потоке
+    health_thread = Thread(target=bot_health_monitor)
+    health_thread.daemon = True
+    health_thread.start()
     
     last_update_id = 0
     error_count = 0
-    max_errors = 10
     
     while True:
         try:
-            # Короткий polling с таймаутом
             data = safe_request(
                 f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates",
-                {
-                    "offset": last_update_id + 1,
-                    "timeout": 20,
-                    "limit": 10
-                },
+                {"offset": last_update_id + 1, "timeout": 20, "limit": 10},
                 "POST",
                 timeout=25
             )
@@ -364,39 +368,21 @@ def telegram_bot():
                     process_update(update)
                 
                 time.sleep(0.5)
-                
             else:
                 error_count += 1
-                if error_count % 5 == 0:
-                    print(f"⚠️  Подряд ошибок: {error_count}")
-                
-                if error_count > max_errors:
-                    print("🔄 Слишком много ошибок, перезапускаю цикл...")
-                    error_count = 0
-                    time.sleep(10)
-                else:
-                    time.sleep(2)
+                if error_count % 10 == 0:
+                    print(f"⚠️  Подряд ошибок получения updates: {error_count}")
+                time.sleep(2)
             
-        except KeyboardInterrupt:
-            print("🛑 Бот остановлен пользователем")
-            break
         except Exception as e:
             error_count += 1
-            print(f"💥 Критическая ошибка в основном цикле: {e}")
-            
-            if error_count > max_errors:
-                print("🚨 Экстренная пауза...")
-                time.sleep(30)
-                error_count = 0
-            else:
-                time.sleep(5)
+            print(f"💥 Ошибка в основном цикле: {e}")
+            time.sleep(5)
 
 def run_flask():
-    """Запуск Flask сервера"""
     app.run(host='0.0.0.0', port=10000, debug=False)
 
 def keep_alive():
-    """Запуск в отдельном потоке"""
     t = Thread(target=run_flask)
     t.daemon = True
     t.start()
