@@ -1,13 +1,12 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request
 from threading import Thread
 import urllib.request
 import urllib.parse
 import json
 import time
 import sqlite3
-from datetime import datetime, timedelta
+from datetime import datetime
 import pytz
-from collections import defaultdict
 import os
 import logging
 
@@ -26,7 +25,6 @@ def init_db():
     conn = sqlite3.connect('bot_database.db', check_same_thread=False)
     cursor = conn.cursor()
     
-    # Таблица пользователей
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
@@ -39,26 +37,21 @@ def init_db():
         )
     ''')
     
-    # Таблица статусов серверов
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS server_statuses (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             user_id INTEGER,
             status TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users (user_id)
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     
-    # Таблица подписок
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS subscriptions (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             subscriber_id INTEGER,
             target_user_id INTEGER,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (subscriber_id) REFERENCES users (user_id),
-            FOREIGN KEY (target_user_id) REFERENCES users (user_id)
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
     
@@ -69,7 +62,6 @@ init_db()
 
 # Глобальные переменные
 bot_start_time = time.time()
-last_activity = time.time()
 bot_enabled = True
 bot_disable_reason = ""
 user_states = {}
@@ -219,6 +211,7 @@ def update_server_status(user_id, status):
         success = edit_message(user['group_id'], user['message_id'], status_text)
         if success:
             logger.info(f"✅ Сообщение {user['message_id']} отредактировано")
+            notify_subscribers(user_id, status)
         else:
             logger.warning(f"❌ Не удалось отредактировать сообщение {user['message_id']}")
         return success
@@ -259,122 +252,9 @@ def generate_status_text(user_id, status):
 
 💡 Используйте бота для управления статусом"""
 
-def send_custom_message(user_id, text):
-    conn = get_db_connection()
-    user = conn.execute('SELECT * FROM users WHERE user_id = ?', (user_id,)).fetchone()
-    conn.close()
-    
-    if user:
-        result = send_message(
-            user['group_id'], 
-            text, 
-            thread_id=user['thread_id'] if user['thread_id'] else None
-        )
-        return result and result.get('ok')
-    return False
-
-def get_global_stats():
-    conn = get_db_connection()
-    
-    # Получаем последние статусы всех пользователей
-    latest_statuses = conn.execute('''
-        SELECT ss.user_id, ss.status, u.group_name
-        FROM server_statuses ss
-        INNER JOIN (
-            SELECT user_id, MAX(created_at) as max_date
-            FROM server_statuses
-            GROUP BY user_id
-        ) latest ON ss.user_id = latest.user_id AND ss.created_at = latest.max_date
-        INNER JOIN users u ON ss.user_id = u.user_id
-    ''').fetchall()
-    
-    conn.close()
-    
-    # Считаем статистику
-    stats = defaultdict(int)
-    servers_info = []
-    
-    for status in latest_statuses:
-        stats[status['status']] += 1
-        servers_info.append({
-            'name': status['group_name'],
-            'status': status['status']
-        })
-    
-    total = sum(stats.values())
-    
-    return {
-        'total_servers': total,
-        'stats': dict(stats),
-        'servers': servers_info
-    }
-
-def get_user_history(user_id, days=7):
-    conn = get_db_connection()
-    history = conn.execute('''
-        SELECT status, created_at 
-        FROM server_statuses 
-        WHERE user_id = ? AND created_at >= datetime('now', ?)
-        ORDER BY created_at DESC
-    ''', (user_id, f'-{days} days')).fetchall()
-    conn.close()
-    return history
-
-# 🔔 СИСТЕМА ПОДПИСОК
-def subscribe_to_server(subscriber_id, target_user_id):
-    conn = get_db_connection()
-    
-    # Проверяем, не подписан ли уже
-    existing = conn.execute('''
-        SELECT id FROM subscriptions 
-        WHERE subscriber_id = ? AND target_user_id = ?
-    ''', (subscriber_id, target_user_id)).fetchone()
-    
-    if existing:
-        conn.close()
-        return False, "Вы уже подписаны на этот сервер"
-    
-    # Проверяем, существует ли целевой пользователь
-    target_user = conn.execute('SELECT group_name FROM users WHERE user_id = ?', (target_user_id,)).fetchone()
-    if not target_user:
-        conn.close()
-        return False, "Сервер не найден"
-    
-    # Создаем подписку
-    conn.execute('''
-        INSERT INTO subscriptions (subscriber_id, target_user_id)
-        VALUES (?, ?)
-    ''', (subscriber_id, target_user_id))
-    conn.commit()
-    conn.close()
-    
-    return True, f"✅ Вы подписались на сервер {target_user['group_name']}"
-
-def unsubscribe_from_server(subscriber_id, target_user_id):
-    conn = get_db_connection()
-    
-    # Получаем информацию о сервере для сообщения
-    target_user = conn.execute('SELECT group_name FROM users WHERE user_id = ?', (target_user_id,)).fetchone()
-    
-    # Удаляем подписку
-    conn.execute('''
-        DELETE FROM subscriptions 
-        WHERE subscriber_id = ? AND target_user_id = ?
-    ''', (subscriber_id, target_user_id))
-    conn.commit()
-    conn.close()
-    
-    if target_user:
-        return True, f"❌ Вы отписались от сервера {target_user['group_name']}"
-    else:
-        return True, "❌ Подписка удалена"
-
 def get_subscriber_count(target_user_id):
     conn = get_db_connection()
-    count = conn.execute('''
-        SELECT COUNT(*) as count FROM subscriptions 
-        WHERE target_user_id = ?
-    ''', (target_user_id,)).fetchone()
+    count = conn.execute('SELECT COUNT(*) as count FROM subscriptions WHERE target_user_id = ?', (target_user_id,)).fetchone()
     conn.close()
     return count['count'] if count else 0
 
@@ -388,10 +268,7 @@ def notify_subscribers(user_id, new_status):
         return
     
     # Получаем подписчиков
-    subscribers = conn.execute('''
-        SELECT subscriber_id FROM subscriptions 
-        WHERE target_user_id = ?
-    ''', (user_id,)).fetchall()
+    subscribers = conn.execute('SELECT subscriber_id FROM subscriptions WHERE target_user_id = ?', (user_id,)).fetchall()
     conn.close()
     
     if not subscribers:
@@ -417,123 +294,6 @@ def notify_subscribers(user_id, new_status):
             send_message(sub['subscriber_id'], notification_text)
         except Exception as e:
             logger.error(f"Ошибка отправки уведомления подписчику {sub['subscriber_id']}: {e}")
-
-def show_subscriptions(user_id, message_id):
-    conn = get_db_connection()
-    
-    # Получаем подписки пользователя
-    subscriptions = conn.execute('''
-        SELECT u.user_id, u.group_name, ss.status
-        FROM subscriptions s
-        JOIN users u ON s.target_user_id = u.user_id
-        LEFT JOIN (
-            SELECT user_id, status, MAX(created_at) as last_update
-            FROM server_statuses
-            GROUP BY user_id
-        ) ss ON u.user_id = ss.user_id
-        WHERE s.subscriber_id = ?
-        ORDER BY u.group_name
-    ''', (user_id,)).fetchall()
-    
-    # Получаем доступные для подписки серверы (кроме своих и уже подписанных)
-    available_servers = conn.execute('''
-        SELECT u.user_id, u.group_name, ss.status
-        FROM users u
-        LEFT JOIN (
-            SELECT user_id, status, MAX(created_at) as last_update
-            FROM server_statuses
-            GROUP BY user_id
-        ) ss ON u.user_id = ss.user_id
-        WHERE u.user_id != ? 
-        AND u.user_id NOT IN (
-            SELECT target_user_id FROM subscriptions WHERE subscriber_id = ?
-        )
-        ORDER BY u.group_name
-    ''', (user_id, user_id)).fetchall()
-    
-    conn.close()
-    
-    status_emojis = {
-        "status_on": "🟢",
-        "status_pause": "🟡",
-        "status_off": "🔴",
-        "status_unknown": "❓"
-    }
-    
-    text = "🔔 <b>Управление подписками</b>\n\n"
-    
-    # Текущие подписки
-    if subscriptions:
-        text += "<b>Ваши подписки:</b>\n"
-        for sub in subscriptions:
-            emoji = status_emojis.get(sub['status'], "❓")
-            text += f"{emoji} {sub['group_name']}\n"
-        text += "\n"
-    else:
-        text += "❌ <i>У вас нет активных подписок</i>\n\n"
-    
-    # Доступные серверы
-    if available_servers:
-        text += "<b>Доступные для подписки:</b>\n"
-        for server in available_servers:
-            emoji = status_emojis.get(server['status'], "❓")
-            text += f"{emoji} {server['group_name']}\n"
-    else:
-        text += "📭 <i>Нет доступных серверов для подписки</i>\n"
-    
-    # Создаем кнопки
-    buttons = []
-    
-    # Кнопки для подписки на доступные серверы
-    for server in available_servers:
-        buttons.append([{
-            "text": f"✅ Подписаться на {server['group_name']}",
-            "callback_data": f"subscribe_{server['user_id']}"
-        }])
-    
-    # Кнопки для отписки от текущих подписок
-    for sub in subscriptions:
-        buttons.append([{
-            "text": f"❌ Отписаться от {sub['group_name']}",
-            "callback_data": f"unsubscribe_{sub['user_id']}"
-        }])
-    
-    # Кнопка обновления и назад
-    buttons.append([{"text": "🔄 Обновить", "callback_data": "subscriptions"}])
-    buttons.append([{"text": "🔙 Назад", "callback_data": "back_to_main"}])
-    
-    edit_message(user_id, message_id, text, buttons)
-
-# ⚙️ АДМИН-ФУНКЦИИ
-def get_all_users():
-    conn = get_db_connection()
-    users = conn.execute('''
-        SELECT u.*, 
-               (SELECT status FROM server_statuses ss 
-                WHERE ss.user_id = u.user_id 
-                ORDER BY ss.created_at DESC LIMIT 1) as last_status,
-               (SELECT COUNT(*) FROM subscriptions s WHERE s.target_user_id = u.user_id) as subscribers_count
-        FROM users u
-    ''').fetchall()
-    conn.close()
-    return users
-
-def broadcast_message(text):
-    conn = get_db_connection()
-    users = conn.execute('SELECT user_id FROM users').fetchall()
-    conn.close()
-    
-    success_count = 0
-    for user in users:
-        if send_message(user['user_id'], text):
-            success_count += 1
-    
-    return success_count
-
-def set_bot_status(enabled, reason=""):
-    global bot_enabled, bot_disable_reason
-    bot_enabled = enabled
-    bot_disable_reason = reason
 
 # 🎯 КНОПКИ И ИНТЕРФЕЙС
 def get_main_menu_buttons():
@@ -596,9 +356,6 @@ def get_create_message_buttons():
 
 # 🚀 ОБРАБОТЧИКИ СООБЩЕНИЙ
 def process_update(update):
-    global last_activity
-    last_activity = time.time()
-    
     if "message" in update:
         return process_message(update["message"])
     elif "callback_query" in update:
@@ -640,15 +397,6 @@ def process_message(message):
                     send_message(user_id, "❌ Неверный формат. Используйте: group_id,thread_id,message_id,название_группы")
             except ValueError:
                 send_message(user_id, "❌ Ошибка в данных. Проверьте числовые значения.")
-            
-            user_states[user_id] = None
-            return True
-            
-        elif state == "waiting_message":
-            if send_custom_message(user_id, text):
-                send_message(user_id, "✅ Сообщение отправлено в группу!", buttons=get_main_menu_buttons())
-            else:
-                send_message(user_id, "❌ Ошибка отправки сообщения!", buttons=get_main_menu_buttons())
             
             user_states[user_id] = None
             return True
@@ -708,10 +456,6 @@ def process_message(message):
                 "<code>-100123456789,,123,Мой Сервер</code>\n\n"
                 "• <b>Группа с темами</b>:\n"
                 "<code>-100123456789,10,123,Мой Сервер</code>\n\n"
-                "🔍 <b>Как найти данные?</b>\n"
-                "• group_id - ID вашей группы\n"
-                "• thread_id - ID темы (если есть)\n"
-                "• message_id - ID сообщения для редактирования\n\n"
                 "ℹ️ <i>Бот будет редактировать указанное сообщение</i>"
             )
             user_states[user_id] = "waiting_group_settings"
@@ -774,8 +518,34 @@ def process_callback(callback):
                             get_main_menu_buttons())
         return True
     
+    # 🔥 ОБРАБОТКА СТАТУСОВ - С ПРОВЕРКОЙ СООБЩЕНИЯ
+    elif data.startswith("status_"):
+        success = update_server_status(user_id, data)
+        
+        if success:
+            status_names = {
+                "status_on": "🟢 ВКЛЮЧЕН",
+                "status_pause": "🟡 ПРИОСТАНОВЛЕН", 
+                "status_off": "🔴 ВЫКЛЮЧЕН",
+                "status_unknown": "❓ НЕИЗВЕСТНО"
+            }
+            edit_message(user_id, message_id,
+                        f"✅ <b>Статус обновлен!</b>\n\n"
+                        f"Новый статус: {status_names.get(data, 'Неизвестно')}\n"
+                        f"⏰ Время: {get_current_time(user_id)}",
+                        get_main_menu_buttons())
+        else:
+            # 🔥 ЕСЛИ СООБЩЕНИЯ НЕТ - ПРЕДЛАГАЕМ СОЗДАТЬ
+            edit_message(user_id, message_id,
+                        "❌ <b>Сообщение не найдено!</b>\n\n"
+                        "Бот не может найти сообщение для редактирования.\n"
+                        "Возможно, сообщение было удалено или не настроено.\n\n"
+                        "Создайте новое сообщение для статуса:",
+                        get_create_message_buttons())
+        return True
+    
     # 🔥 ИСПРАВЛЕННЫЕ ОБРАБОТЧИКИ АДМИН-ПАНЕЛИ
-    if data == "admin_panel":
+    elif data == "admin_panel":
         if int(user_id) == int(ADMIN_USER_ID):
             show_admin_panel(user_id, message_id)
         else:
@@ -812,32 +582,6 @@ def process_callback(callback):
                     [[{"text": "🔙 Отмена", "callback_data": "admin_manage_bot"}]])
         return True
     
-    # Обработка статусов - ТЕПЕРЬ С ПРОВЕРКОЙ СООБЩЕНИЯ
-    elif data.startswith("status_"):
-        success = update_server_status(user_id, data)
-        
-        if success:
-            status_names = {
-                "status_on": "🟢 ВКЛЮЧЕН",
-                "status_pause": "🟡 ПРИОСТАНОВЛЕН", 
-                "status_off": "🔴 ВЫКЛЮЧЕН",
-                "status_unknown": "❓ НЕИЗВЕСТНО"
-            }
-            edit_message(user_id, message_id,
-                        f"✅ <b>Статус обновлен!</b>\n\n"
-                        f"Новый статус: {status_names.get(data, 'Неизвестно')}\n"
-                        f"⏰ Время: {get_current_time(user_id)}",
-                        get_main_menu_buttons())
-        else:
-            # 🔥 ЕСЛИ СООБЩЕНИЯ НЕТ - ПРЕДЛАГАЕМ СОЗДАТЬ
-            edit_message(user_id, message_id,
-                        "❌ <b>Сообщение не найдено!</b>\n\n"
-                        "Бот не может найти сообщение для редактирования.\n"
-                        "Возможно, сообщение было удалено или не настроено.\n\n"
-                        "Создайте новое сообщение для статуса:",
-                        get_create_message_buttons())
-        return True
-    
     # Остальные обработчики
     elif data == "start_setup":
         welcome_text = (
@@ -870,8 +614,159 @@ def process_callback(callback):
         edit_message(user_id, message_id, help_text, [[{"text": "🔙 Назад", "callback_data": "start_setup"}]])
         return True
     
-    elif data.startswith("subscribe_"):
-        target_user_id = int(data.split("_")[1])
-        success, message = subscribe_to_server(user_id, target_user_id)
+    elif data == "back_to_main":
+        show_main_menu(user_id, message_id)
+        return True
         
-       
+    elif data == "back_to_settings":
+        show_settings(user_id, message_id)
+        return True
+        
+    elif data == "manage_status":
+        show_status_management(user_id, message_id)
+        return True
+        
+    elif data == "stats":
+        show_stats(user_id, message_id)
+        return True
+        
+    elif data == "settings":
+        show_settings(user_id, message_id)
+        return True
+        
+    elif data == "change_timezone":
+        user_states[user_id] = "waiting_timezone"
+        edit_message(user_id, message_id,
+                    "🕐 <b>Изменение часового пояса</b>\n\n"
+                    "Введите ваш часовой пояс (например: Europe/Moscow, Asia/Yekaterinburg):",
+                    [[{"text": "🔙 Отмена", "callback_data": "back_to_settings"}]])
+        return True
+        
+    elif data == "change_group_settings":
+        user_states[user_id] = "waiting_group_settings"
+        edit_message(user_id, message_id,
+                    "✏️ <b>Настройки группы</b>\n\n"
+                    "Введите данные в формате:\n"
+                    "<code>group_id,thread_id,message_id,название_группы</code>\n\n"
+                    "Пример:\n"
+                    "<code>-100123456,10,123,Мой Сервер</code>\n\n"
+                    "Если темы нет, оставьте thread_id пустым:\n"
+                    "<code>-100123456,,123,Мой Сервер</code>",
+                    [[{"text": "🔙 Отмена", "callback_data": "back_to_settings"}]])
+        return True
+    
+    return True
+
+# 🎯 ФУНКЦИИ ОТОБРАЖЕНИЯ
+def show_main_menu(user_id, message_id=None):
+    conn = get_db_connection()
+    user = conn.execute('SELECT * FROM users WHERE user_id = ?', (user_id,)).fetchone()
+    conn.close()
+    
+    if user:
+        text = (
+            f"🤖 <b>Управление статусами серверов</b>\n\n"
+            f"🏷️ <b>Текущая группа:</b> {user['group_name']}\n"
+            f"📋 ID группы: {user['group_id']}\n"
+            f"💬 Сообщение: {user['message_id'] if user['message_id'] else '❌ Не создано'}\n"
+            f"🏷️ Тема: {user['thread_id'] if user['thread_id'] else 'Нет'}\n"
+            f"⏰ Часовой пояс: {user['timezone']}\n\n"
+            f"<b>Доступные функции:</b>\n"
+            "• ⚡ Управление статусом сервера\n"
+            "• 📝 Отправка сообщений в группу\n" 
+            "• 📊 Просмотр статистики\n"
+            "• 📈 История изменений\n"
+            "• 🔔 Управление подписками\n"
+            "• ⚙️ Настройки\n\n"
+            f"⏰ Ваше время: {get_current_time(user_id)}"
+        )
+    else:
+        text = "❌ <b>Бот не настроен</b>\n\nИспользуйте настройки для конфигурации"
+    
+    if message_id:
+        edit_message(user_id, message_id, text, get_main_menu_buttons())
+    else:
+        send_message(user_id, text, get_main_menu_buttons())
+
+def show_status_management(user_id, message_id):
+    conn = get_db_connection()
+    user = conn.execute('SELECT * FROM users WHERE user_id = ?', (user_id,)).fetchone()
+    conn.close()
+    
+    if not user:
+        text = "❌ <b>Сначала настройте группу!</b>\n\nПерейдите в настройки и укажите данные вашей группы."
+        edit_message(user_id, message_id, text, [[{"text": "⚙️ Настройки", "callback_data": "settings"}]])
+        return
+    
+    # 🔥 ПРОВЕРЯЕМ ЕСТЬ ЛИ СООБЩЕНИЕ
+    if not user['message_id']:
+        text = (
+            "⚠️ <b>Сообщение не настроено</b>\n\n"
+            "Для управления статусом нужно сообщение в группе.\n\n"
+            "Выберите действие:"
+        )
+        buttons = [
+            [{"text": "📝 Создать сообщение", "callback_data": "create_status_message"}],
+            [{"text": "⚙️ Настроить сообщение", "callback_data": "change_group_settings"}],
+            [{"text": "🔙 Назад", "callback_data": "back_to_main"}]
+        ]
+    else:
+        text = (
+            "⚡ <b>Управление статусом сервера</b>\n\n"
+            f"Группа: {user['group_name']}\n"
+            f"Сообщение: {user['message_id']}\n"
+            f"Тема: {user['thread_id'] if user['thread_id'] else 'Нет'}\n"
+            f"Подписчиков: {get_subscriber_count(user_id)}\n\n"
+            "Выберите новый статус:"
+        )
+        buttons = get_status_buttons()
+    
+    edit_message(user_id, message_id, text, buttons)
+
+def show_stats(user_id, message_id=None):
+    conn = get_db_connection()
+    
+    # Получаем последние статусы всех пользователей
+    latest_statuses = conn.execute('''
+        SELECT ss.user_id, ss.status, u.group_name
+        FROM server_statuses ss
+        INNER JOIN (
+            SELECT user_id, MAX(created_at) as max_date
+            FROM server_statuses
+            GROUP BY user_id
+        ) latest ON ss.user_id = latest.user_id AND ss.created_at = latest.max_date
+        INNER JOIN users u ON ss.user_id = u.user_id
+    ''').fetchall()
+    conn.close()
+    
+    # Считаем статистику
+    stats = {"status_on": 0, "status_pause": 0, "status_off": 0, "status_unknown": 0}
+    for status in latest_statuses:
+        if status['status'] in stats:
+            stats[status['status']] += 1
+    
+    total = sum(stats.values())
+    
+    status_emojis = {
+        "status_on": "🟢",
+        "status_pause": "🟡",
+        "status_off": "🔴", 
+        "status_unknown": "❓"
+    }
+    
+    status_text = ""
+    for status, count in stats.items():
+        emoji = status_emojis.get(status, "❓")
+        status_text += f"{emoji} {count}\n"
+    
+    text = (
+        "📊 <b>Глобальная статистика</b>\n\n"
+        f"Всего серверов: {total}\n\n"
+        f"Статусы:\n{status_text}\n"
+        f"⏰ Обновлено: {get_current_time(user_id)}"
+    )
+    
+    if message_id:
+        edit_message(user_id, message_id, text, [[{"text": "🔙 Назад", "callback_data": "back_to_main"}]])
+    else:
+        send_message(user_id, text, [[{"text": "🔙 Назад", "callback_data": "back_to_main"}]])
